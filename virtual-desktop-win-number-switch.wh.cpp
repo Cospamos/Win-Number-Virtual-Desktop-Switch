@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.3
+// @version         1.4
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -706,6 +706,19 @@ void SendMarkedSyntheticKeystroke(WORD vk) {
   SendInput(2, inputs, sizeof(INPUT));
 }
 
+// Even when SetForegroundWindow succeeds, Windows can still play a one-shot
+// taskbar flash as a "courtesy" notification since the change came from a
+// background process rather than direct user input. FLASHW_STOP cancels
+// any flash state (pending or in progress) on a window's taskbar button.
+void StopWindowFlash(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd)) return;
+  FLASHWINFO fi = {};
+  fi.cbSize = sizeof(fi);
+  fi.hwnd = hwnd;
+  fi.dwFlags = FLASHW_STOP;
+  FlashWindowEx(&fi);
+}
+
 // A background process normally can't steal foreground focus - Windows just
 // leaves the window looking active (on top, maximized) without it actually
 // holding real input focus. If you then switch away without ever having
@@ -734,6 +747,13 @@ void ForceForegroundWindow(HWND hwnd) {
 
   if (attached) {
     AttachThreadInput(foregroundThreadId, currentThreadId, FALSE);
+  }
+
+  // Cancel any courtesy flash Windows might still queue on either side of
+  // the switch, now that focus has genuinely moved.
+  StopWindowFlash(hwnd);
+  if (currentForeground && currentForeground != hwnd) {
+    StopWindowFlash(currentForeground);
   }
 }
 
