@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.2
+// @version         1.3
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -691,17 +691,35 @@ HWND FindWindowOnDesktop(const GUID& desktopId) {
   return ctx.result;
 }
 
+// Sends a harmless synthetic keystroke, tagged so our own hook ignores it.
+// Besides letting us neutralize specific key effects (see call sites), this
+// is also what makes ForceForegroundWindow's SetForegroundWindow call
+// actually take effect: per MSDN, a process qualifies to set the foreground
+// window if it "received the last input event ... by using SendInput".
+void SendMarkedSyntheticKeystroke(WORD vk) {
+  INPUT inputs[2] = {};
+  inputs[0].type = INPUT_KEYBOARD;
+  inputs[0].ki.wVk = vk;
+  inputs[0].ki.dwExtraInfo = kInjectedKeyMarker;
+  inputs[1] = inputs[0];
+  inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+  SendInput(2, inputs, sizeof(INPUT));
+}
+
 // A background process normally can't steal foreground focus - Windows just
-// flashes the taskbar button of whichever window "wanted" it instead.
-// Attaching input state to the current foreground thread first is the
-// standard way to get SetForegroundWindow to actually take effect, avoiding
-// that flash after a desktop switch.
+// leaves the window looking active (on top, maximized) without it actually
+// holding real input focus. If you then switch away without ever having
+// clicked into it, Windows treats it as still "waiting" and flashes its
+// taskbar button, which doesn't clear until you click back to it. Actually
+// taking real foreground/input focus here (not just Z-order) prevents that.
 void ForceForegroundWindow(HWND hwnd) {
   if (!hwnd || !IsWindow(hwnd)) return;
 
   if (IsIconic(hwnd)) {
     ShowWindow(hwnd, SW_RESTORE);
   }
+
+  SendMarkedSyntheticKeystroke(VK_CONTROL);
 
   HWND currentForeground = GetForegroundWindow();
   DWORD foregroundThreadId = currentForeground ? GetWindowThreadProcessId(currentForeground, nullptr) : 0;
@@ -712,6 +730,7 @@ void ForceForegroundWindow(HWND hwnd) {
 
   SetForegroundWindow(hwnd);
   BringWindowToTop(hwnd);
+  SetFocus(hwnd);
 
   if (attached) {
     AttachThreadInput(foregroundThreadId, currentThreadId, FALSE);
@@ -816,19 +835,6 @@ bool MoveActiveWindowToDesktopNum(int desktopNum) {
 // shortcut handling sees them.
 //=============================================================================
 
-// Sends a harmless synthetic Ctrl tap while Win is still held, so Explorer's
-// "Win was tapped alone" Start Menu detection doesn't fire once we swallow
-// the real digit key below. Tagged so our own hook ignores it.
-void SuppressStartMenuFlash() {
-  INPUT inputs[2] = {};
-  inputs[0].type = INPUT_KEYBOARD;
-  inputs[0].ki.wVk = VK_CONTROL;
-  inputs[0].ki.dwExtraInfo = kInjectedKeyMarker;
-  inputs[1] = inputs[0];
-  inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-  SendInput(2, inputs, sizeof(INPUT));
-}
-
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (nCode == HC_ACTION) {
     KBDLLHOOKSTRUCT* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
@@ -860,7 +866,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
         if (isDown) {
           if (!g_digitKeyDown[digit]) {
             g_digitKeyDown[digit] = true;
-            SuppressStartMenuFlash();
+            SendMarkedSyntheticKeystroke(VK_CONTROL);  // prevents "Win tapped alone" Start Menu flash
             if (g_threadId) {
               PostThreadMessage(g_threadId,
                                  shiftHeld ? WM_APP_MOVE_WINDOW_TO_DESKTOP : WM_APP_SWITCH_DESKTOP,
