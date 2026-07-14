@@ -57,11 +57,21 @@ settings to get Windows' default (flashing) behavior back.
 
 ## Hiding the "current desktop" name indicator
 
-Recent Windows 11 builds show a small on-screen label with the desktop's
-name/number when you switch. That's a native shell overlay, not something
-this mod draws or controls, so it can't be turned off from the mod - disable
-it in **Settings → System → Multitasking → Virtual desktops → "Show visual
-indicators for open windows on the taskbar and the desktop"**.
+Recent Windows 11 builds can show a small on-screen label with the desktop's
+name/number when you switch. That's a native shell overlay gated behind an
+internal Windows feature flag (not a regular Settings toggle), so this mod
+doesn't touch it - it's not something a Windhawk mod draws or controls.
+
+If you enabled it yourself (or it got turned on for you) and want it gone,
+use [ViVeTool](https://github.com/thebookisclosed/ViVe) as Administrator:
+
+```
+vivetool /disable /id:42354458,34508225,40459297
+```
+
+then restart. Note these feature IDs are shared with some Cloud PC/Windows
+365 switching functionality, so treat this as an experimental tweak rather
+than a dedicated "hide the label" switch.
 
 ## A note on admin rights (UIPI)
 
