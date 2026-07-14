@@ -2,8 +2,9 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.0
-// @author          you
+// @version         1.1
+// @author          Cospamos
+// @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
 // @compilerOptions -lole32 -loleaut32 -luuid
 // @license         MIT
@@ -17,6 +18,8 @@ Replaces the default Windows Win+1..9 behavior (activate the Nth app pinned/open
 on the taskbar) with Linux-style virtual desktop switching:
 
 - **Win+N** switches to virtual desktop N.
+- **Win+Shift+N** moves the currently focused window to desktop N, without
+  switching your own view away from the desktop you're on.
 - If desktop N does not exist yet, it (and any desktops before it) is **created
   automatically**.
 - When you switch away from a desktop that has **no windows left on it**
@@ -26,9 +29,10 @@ on the taskbar) with Linux-style virtual desktop switching:
 ## How it works
 
 This mod runs as a dedicated background process (a Windhawk "tool mod") and
-installs a low-level keyboard hook that intercepts Win+1..9 system-wide before
-Explorer's own taskbar shortcut handling sees it, then talks to the
-undocumented Virtual Desktop COM interfaces to switch/create/remove desktops.
+installs a low-level keyboard hook that intercepts Win+1..9 and Win+Shift+1..9
+system-wide before Explorer's own taskbar shortcut handling sees them, then
+talks to the undocumented Virtual Desktop COM interfaces to
+switch/create/remove desktops and move windows between them.
 
 ## Important notes
 
@@ -73,6 +77,14 @@ undocumented Virtual Desktop COM interfaces to switch/create/remove desktops.
   $description: >-
     Replace the default Win+1..9 behavior (activate Nth taskbar app) with
     switching to virtual desktop N.
+
+- EnableMoveWindowSwitch: true
+  $name: Enable Win+Shift+Number move window to desktop
+  $description: >-
+    Win+Shift+1..9 moves the currently focused window to desktop N (creating
+    it first if needed) without switching your own view away from the
+    current desktop. This replaces the default Windows Win+Shift+N behavior
+    (open a new instance of the Nth taskbar app).
 
 - AutoCreateDesktop: true
   $name: Auto-create missing desktops
@@ -227,14 +239,18 @@ static volatile bool g_stopHotkeyThread = false;
 static HHOOK g_keyboardHook = nullptr;
 
 static bool g_enableWinNumberSwitch = true;
+static bool g_enableMoveWindowSwitch = true;
 static bool g_autoCreateDesktop = true;
 static bool g_autoRemoveEmptyDesktop = true;
 
 #define WM_APP_SWITCH_DESKTOP (WM_APP + 1)
+#define WM_APP_MOVE_WINDOW_TO_DESKTOP (WM_APP + 2)
 static constexpr ULONG_PTR kInjectedKeyMarker = 0x57494E4Eu;  // 'WINN', tags our own synthetic input
 
 static bool g_leftWinDown = false;
 static bool g_rightWinDown = false;
+static bool g_leftShiftDown = false;
+static bool g_rightShiftDown = false;
 static bool g_digitKeyDown[10] = {};
 
 //=============================================================================
@@ -314,6 +330,7 @@ void LoadSettings() {
   Wh_Log(L"Using Windows version bucket index: %d", g_windowsVersionIndex);
 
   g_enableWinNumberSwitch = Wh_GetIntSetting(L"EnableWinNumberSwitch") != 0;
+  g_enableMoveWindowSwitch = Wh_GetIntSetting(L"EnableMoveWindowSwitch") != 0;
   g_autoCreateDesktop = Wh_GetIntSetting(L"AutoCreateDesktop") != 0;
   g_autoRemoveEmptyDesktop = Wh_GetIntSetting(L"AutoRemoveEmptyDesktop") != 0;
 }
@@ -468,6 +485,7 @@ HRESULT CallRemoveDesktop(IVirtualDesktop* toRemove, IVirtualDesktop* fallback) 
 // Virtual Desktop Operations
 //=============================================================================
 
+static const int VTABLE_MOVE_VIEW_TO_DESKTOP = 4;
 static const int VTABLE_GET_CURRENT_DESKTOP = 6;
 static const int VTABLE_GET_DESKTOPS = 7;
 static const int VTABLE_SWITCH_DESKTOP = 9;
@@ -557,6 +575,15 @@ bool RemoveDesktopInternal(IVirtualDesktop* toRemove, IVirtualDesktop* fallback)
   if (!g_pDesktopManagerInternal || !toRemove || !fallback) return false;
   HRESULT hr = CallRemoveDesktop(toRemove, fallback);
   if (FAILED(hr)) Wh_Log(L"RemoveDesktop failed: 0x%08X", hr);
+  return SUCCEEDED(hr);
+}
+
+bool MoveViewToDesktop(IApplicationView* view, IVirtualDesktop* desktop) {
+  if (!g_pDesktopManagerInternal || !view || !desktop) return false;
+  auto pfn = GetVTableFunction<HRESULT(STDMETHODCALLTYPE*)(void*, IApplicationView*, IVirtualDesktop*)>(
+      g_pDesktopManagerInternal, VTABLE_MOVE_VIEW_TO_DESKTOP);
+  HRESULT hr = pfn(g_pDesktopManagerInternal, view, desktop);
+  if (FAILED(hr)) Wh_Log(L"MoveViewToDesktop failed: 0x%08X", hr);
   return SUCCEEDED(hr);
 }
 
@@ -670,6 +697,44 @@ bool GoToDesktopNum(int desktopNum) {
   return switched;
 }
 
+// Moves the currently focused window to desktop N without switching the
+// view away from the desktop you're currently on.
+bool MoveActiveWindowToDesktopNum(int desktopNum) {
+  if (!InitializeVirtualDesktopAPI() || desktopNum < 1 || desktopNum > 9) return false;
+
+  if (g_autoCreateDesktop && !EnsureDesktopCount(desktopNum)) {
+    Wh_Log(L"Failed to create desktop(s) up to %d", desktopNum);
+  }
+
+  HWND hwnd = GetForegroundWindow();
+  if (!hwnd || !IsEligibleWindow(hwnd)) {
+    Wh_Log(L"No eligible active window to move");
+    return false;
+  }
+
+  IVirtualDesktop* targetDesktop = GetDesktopByIndex(desktopNum - 1);
+  if (!targetDesktop) {
+    Wh_Log(L"Desktop %d not available (not created?)", desktopNum);
+    return false;
+  }
+
+  IApplicationView* view = nullptr;
+  if (!g_pViewCollection || FAILED(g_pViewCollection->GetViewForHwnd(hwnd, &view)) || !view) {
+    Wh_Log(L"Failed to get view for active window");
+    targetDesktop->Release();
+    return false;
+  }
+
+  bool moved = MoveViewToDesktop(view, targetDesktop);
+  if (moved) {
+    Wh_Log(L"Moved active window to desktop %d", desktopNum);
+  }
+
+  view->Release();
+  targetDesktop->Release();
+  return moved;
+}
+
 //=============================================================================
 // Low-level keyboard hook: intercept Win+1..9 before Explorer's taskbar
 // shortcut handling sees them.
@@ -689,7 +754,7 @@ void SuppressStartMenuFlash() {
 }
 
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
-  if (nCode == HC_ACTION && g_enableWinNumberSwitch) {
+  if (nCode == HC_ACTION) {
     KBDLLHOOKSTRUCT* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
     if (kb->dwExtraInfo != kInjectedKeyMarker) {
@@ -702,21 +767,32 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
       } else if (kb->vkCode == VK_RWIN) {
         if (isDown) g_rightWinDown = true;
         else if (isUp) g_rightWinDown = false;
+      } else if (kb->vkCode == VK_LSHIFT) {
+        if (isDown) g_leftShiftDown = true;
+        else if (isUp) g_leftShiftDown = false;
+      } else if (kb->vkCode == VK_RSHIFT) {
+        if (isDown) g_rightShiftDown = true;
+        else if (isUp) g_rightShiftDown = false;
       }
 
       bool winHeld = g_leftWinDown || g_rightWinDown;
+      bool shiftHeld = g_leftShiftDown || g_rightShiftDown;
+      bool shouldHandle = shiftHeld ? g_enableMoveWindowSwitch : g_enableWinNumberSwitch;
 
-      if (winHeld && kb->vkCode >= '1' && kb->vkCode <= '9') {
+      if (winHeld && shouldHandle && kb->vkCode >= '1' && kb->vkCode <= '9') {
         int digit = kb->vkCode - '0';
         if (isDown) {
           if (!g_digitKeyDown[digit]) {
             g_digitKeyDown[digit] = true;
             SuppressStartMenuFlash();
             if (g_threadId) {
-              PostThreadMessage(g_threadId, WM_APP_SWITCH_DESKTOP, (WPARAM)digit, 0);
+              PostThreadMessage(g_threadId,
+                                 shiftHeld ? WM_APP_MOVE_WINDOW_TO_DESKTOP : WM_APP_SWITCH_DESKTOP,
+                                 (WPARAM)digit, 0);
             }
           }
-          return 1;  // swallow: prevents Explorer's "activate Nth taskbar app"
+          // swallow: prevents Explorer's default Win(+Shift)+N taskbar behavior
+          return 1;
         } else if (isUp) {
           g_digitKeyDown[digit] = false;
           return 1;
@@ -765,6 +841,13 @@ DWORD WINAPI HotkeyThreadProc(LPVOID) {
             Wh_Log(L"Desktop switch ignored: API not initialized");
           } else {
             GoToDesktopNum(digit);
+          }
+        } else if (msg.message == WM_APP_MOVE_WINDOW_TO_DESKTOP) {
+          int digit = (int)msg.wParam;
+          if (!g_bInitialized && !InitializeVirtualDesktopAPI()) {
+            Wh_Log(L"Move-to-desktop ignored: API not initialized");
+          } else {
+            MoveActiveWindowToDesktopNum(digit);
           }
         }
       }

@@ -5,6 +5,8 @@ Win+1..9 behavior (activate the Nth app pinned/open on the taskbar) with
 Linux-style virtual desktop switching:
 
 - **Win+N** switches to virtual desktop N.
+- **Win+Shift+N** moves the currently focused window to desktop N, without
+  switching your own view away from the desktop you're on.
 - If desktop N doesn't exist yet, it (and any desktops before it) is
   **created automatically**.
 - When you switch away from a desktop that has **no windows left on it**
@@ -32,6 +34,7 @@ and friends) to switch, create, and remove desktops.
 |---|---|---|
 | Windows Version | `auto` | COM interface IDs differ between Windows builds; auto-detected from the registry, or override manually. |
 | Enable Win+Number desktop switching | on | Master toggle for the Win+N remap. |
+| Enable Win+Shift+Number move window to desktop | on | Master toggle for the Win+Shift+N remap. |
 | Auto-create missing desktops | on | Create desktop N (and any before it) if it doesn't exist yet. |
 | Auto-remove empty desktops | on | Remove a desktop you just left if it has no windows on it. |
 | Request admin rights for the background helper | **off** | See below. |
