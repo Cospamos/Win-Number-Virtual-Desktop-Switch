@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.4
+// @version         1.5
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -25,9 +25,10 @@ on the taskbar) with Linux-style virtual desktop switching:
 - When you switch away from a desktop that has **no windows left on it**
   (windows pinned to all desktops don't count), that desktop is **removed
   automatically**.
-- No taskbar flash asking you to switch back: the mod forces focus onto a
-  window on the desktop you just switched to, instead of leaving Windows to
-  fail at it silently and flash the previous window's taskbar button.
+- No taskbar flash asking you to switch back: before switching, the mod hands
+  focus to Explorer's own taskbar window so its internal focus-restore isn't
+  denied and doesn't fall back to flashing a taskbar button, then takes real
+  focus for the actual target window itself right after.
 
 ## How it works
 
@@ -750,10 +751,15 @@ void ForceForegroundWindow(HWND hwnd) {
   }
 
   // Cancel any courtesy flash Windows might still queue on either side of
-  // the switch, now that focus has genuinely moved.
-  StopWindowFlash(hwnd);
-  if (currentForeground && currentForeground != hwnd) {
-    StopWindowFlash(currentForeground);
+  // the switch. Explorer can schedule its own flash slightly after our
+  // SwitchDesktop call returns, so a single immediate FLASHW_STOP can lose
+  // the race - retry briefly to reliably catch it.
+  for (int i = 0; i < 3; ++i) {
+    StopWindowFlash(hwnd);
+    if (currentForeground && currentForeground != hwnd) {
+      StopWindowFlash(currentForeground);
+    }
+    Sleep(50);
   }
 }
 
@@ -780,6 +786,21 @@ bool GoToDesktopNum(int desktopNum) {
   if (hasOldId && hasTargetId && IsEqualGUID(oldDesktopId, targetId)) {
     targetDesktop->Release();
     return true;  // already there
+  }
+
+  if (g_fixTaskbarFlash) {
+    // Hand focus to Explorer's own taskbar window right before switching.
+    // SwitchDesktop tries to restore focus to a window on the target desktop
+    // internally; if that attempt happens while a random background process
+    // (us) holds the "last input" token, it gets denied and Explorer falls
+    // back to flashing a taskbar button instead. Doing it in the shell's own
+    // foreground context avoids that. We reclaim real focus for the actual
+    // target window ourselves right after (see ForceForegroundWindow below).
+    SendMarkedSyntheticKeystroke(VK_CONTROL);
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (taskbar) {
+      SetForegroundWindow(taskbar);
+    }
   }
 
   bool switched = SwitchToDesktop(targetDesktop);

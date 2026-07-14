@@ -47,10 +47,21 @@ and friends) to switch, create, and remove desktops.
 Windows sometimes can't silently restore focus to a window on the desktop
 you just switched to (the request comes from a background process), and
 falls back to flashing a taskbar button asking you to switch back to where
-you came from. By default this mod forces focus onto the last active window
-on the desktop you switch to, which avoids that flash. Turn off "Prevent
-taskbar flash after switching desktops" in settings to get Windows' default
-(flashing) behavior back.
+you came from. Before switching, this mod hands focus to Explorer's own
+taskbar window (`Shell_TrayWnd`) first, so Explorer's internal focus-restore
+runs in the shell's own context instead of getting denied, then takes real
+focus for the actual target window itself right after (with a couple of
+retried `FLASHW_STOP` calls as a safety net for anything Explorer schedules
+slightly late). Turn off "Prevent taskbar flash after switching desktops" in
+settings to get Windows' default (flashing) behavior back.
+
+## Hiding the "current desktop" name indicator
+
+Recent Windows 11 builds show a small on-screen label with the desktop's
+name/number when you switch. That's a native shell overlay, not something
+this mod draws or controls, so it can't be turned off from the mod - disable
+it in **Settings → System → Multitasking → Virtual desktops → "Show visual
+indicators for open windows on the taskbar and the desktop"**.
 
 ## A note on admin rights (UIPI)
 
