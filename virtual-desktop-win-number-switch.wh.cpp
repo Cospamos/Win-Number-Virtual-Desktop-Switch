@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.1
+// @version         1.2
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -25,6 +25,9 @@ on the taskbar) with Linux-style virtual desktop switching:
 - When you switch away from a desktop that has **no windows left on it**
   (windows pinned to all desktops don't count), that desktop is **removed
   automatically**.
+- No taskbar flash asking you to switch back: the mod forces focus onto a
+  window on the desktop you just switched to, instead of leaving Windows to
+  fail at it silently and flash the previous window's taskbar button.
 
 ## How it works
 
@@ -97,6 +100,17 @@ switch/create/remove desktops and move windows between them.
   $description: >-
     When you switch away from a desktop that has no windows left on it
     (ignoring windows pinned to all desktops), remove it automatically.
+
+- FixTaskbarFlash: true
+  $name: Prevent taskbar flash after switching desktops
+  $description: >-
+    On by default. Windows sometimes can't silently restore focus to a
+    window on the desktop you just switched to (because the request comes
+    from a background process), and instead flashes a taskbar button asking
+    you to switch back to where you came from. When enabled, this mod
+    forces focus onto the last active window on the desktop you switch to,
+    which prevents that flash. Turn off to get Windows' default (flashing)
+    behavior back.
 
 - RequestElevatedHelper: false
   $name: Request admin rights for the background helper
@@ -242,6 +256,7 @@ static bool g_enableWinNumberSwitch = true;
 static bool g_enableMoveWindowSwitch = true;
 static bool g_autoCreateDesktop = true;
 static bool g_autoRemoveEmptyDesktop = true;
+static bool g_fixTaskbarFlash = true;
 
 #define WM_APP_SWITCH_DESKTOP (WM_APP + 1)
 #define WM_APP_MOVE_WINDOW_TO_DESKTOP (WM_APP + 2)
@@ -333,6 +348,7 @@ void LoadSettings() {
   g_enableMoveWindowSwitch = Wh_GetIntSetting(L"EnableMoveWindowSwitch") != 0;
   g_autoCreateDesktop = Wh_GetIntSetting(L"AutoCreateDesktop") != 0;
   g_autoRemoveEmptyDesktop = Wh_GetIntSetting(L"AutoRemoveEmptyDesktop") != 0;
+  g_fixTaskbarFlash = Wh_GetIntSetting(L"FixTaskbarFlash") != 0;
 }
 
 //=============================================================================
@@ -649,6 +665,59 @@ bool IsDesktopEmpty(const GUID& desktopId) {
   return ctx.empty;
 }
 
+// Topmost (Z-order) eligible window that lives on the given desktop, if any.
+HWND FindWindowOnDesktop(const GUID& desktopId) {
+  struct Ctx {
+    GUID id;
+    HWND result;
+  } ctx{desktopId, nullptr};
+
+  EnumWindows(
+      [](HWND hwnd, LPARAM lParam) WINAPI -> BOOL {
+        auto* ctx = reinterpret_cast<Ctx*>(lParam);
+        if (!IsEligibleWindow(hwnd)) return TRUE;
+
+        GUID windowDesktopId;
+        if (g_pDesktopManager && SUCCEEDED(g_pDesktopManager->GetWindowDesktopId(hwnd, &windowDesktopId))) {
+          if (IsEqualGUID(windowDesktopId, ctx->id)) {
+            ctx->result = hwnd;
+            return FALSE;
+          }
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+
+  return ctx.result;
+}
+
+// A background process normally can't steal foreground focus - Windows just
+// flashes the taskbar button of whichever window "wanted" it instead.
+// Attaching input state to the current foreground thread first is the
+// standard way to get SetForegroundWindow to actually take effect, avoiding
+// that flash after a desktop switch.
+void ForceForegroundWindow(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd)) return;
+
+  if (IsIconic(hwnd)) {
+    ShowWindow(hwnd, SW_RESTORE);
+  }
+
+  HWND currentForeground = GetForegroundWindow();
+  DWORD foregroundThreadId = currentForeground ? GetWindowThreadProcessId(currentForeground, nullptr) : 0;
+  DWORD currentThreadId = GetCurrentThreadId();
+
+  bool attached = foregroundThreadId && foregroundThreadId != currentThreadId &&
+                  AttachThreadInput(foregroundThreadId, currentThreadId, TRUE);
+
+  SetForegroundWindow(hwnd);
+  BringWindowToTop(hwnd);
+
+  if (attached) {
+    AttachThreadInput(foregroundThreadId, currentThreadId, FALSE);
+  }
+}
+
 bool GoToDesktopNum(int desktopNum) {
   if (!InitializeVirtualDesktopAPI() || desktopNum < 1 || desktopNum > 9) return false;
 
@@ -678,6 +747,13 @@ bool GoToDesktopNum(int desktopNum) {
 
   if (switched) {
     Wh_Log(L"Switched to desktop %d", desktopNum);
+
+    if (g_fixTaskbarFlash && hasTargetId) {
+      HWND toFocus = FindWindowOnDesktop(targetId);
+      if (toFocus) {
+        ForceForegroundWindow(toFocus);
+      }
+    }
 
     if (g_autoRemoveEmptyDesktop && hasOldId && oldIndex >= 0 && IsDesktopEmpty(oldDesktopId)) {
       IVirtualDesktop* oldDesktop = GetDesktopByIndex(oldIndex);

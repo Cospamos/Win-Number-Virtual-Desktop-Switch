@@ -12,6 +12,8 @@ Linux-style virtual desktop switching:
 - When you switch away from a desktop that has **no windows left on it**
   (windows pinned to all desktops don't count), that desktop is **removed
   automatically**.
+- No taskbar flash asking you to switch back after switching desktops (see
+  below).
 
 ## Installation
 
@@ -37,7 +39,18 @@ and friends) to switch, create, and remove desktops.
 | Enable Win+Shift+Number move window to desktop | on | Master toggle for the Win+Shift+N remap. |
 | Auto-create missing desktops | on | Create desktop N (and any before it) if it doesn't exist yet. |
 | Auto-remove empty desktops | on | Remove a desktop you just left if it has no windows on it. |
+| Prevent taskbar flash after switching desktops | on | See below. |
 | Request admin rights for the background helper | **off** | See below. |
+
+## Taskbar flash after switching desktops
+
+Windows sometimes can't silently restore focus to a window on the desktop
+you just switched to (the request comes from a background process), and
+falls back to flashing a taskbar button asking you to switch back to where
+you came from. By default this mod forces focus onto the last active window
+on the desktop you switch to, which avoids that flash. Turn off "Prevent
+taskbar flash after switching desktops" in settings to get Windows' default
+(flashing) behavior back.
 
 ## A note on admin rights (UIPI)
 
