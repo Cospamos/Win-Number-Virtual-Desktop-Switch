@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.8
+// @version         1.9
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -803,11 +803,13 @@ void ForceForegroundWindow(HWND hwnd) {
 void SuppressDesktopLabelWindow(HWND hwnd) {
   // A single ShowWindow(SW_HIDE) can lose a race against the overlay's own
   // fade-in animation re-asserting itself a frame later, so hit it a few
-  // times with different techniques over a short span.
+  // times with different techniques over a short span: hide, shrink to
+  // nothing, and move off-screen, in case the actual pixels are composited
+  // by DWM/DirectComposition independently of classic Win32 visibility.
   for (int i = 0; i < 6; ++i) {
     ShowWindow(hwnd, SW_HIDE);
-    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                 SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0,
+                 SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
     Sleep(30);
   }
 }
@@ -1225,6 +1227,10 @@ HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR l
   bool isLabelClass = IsLabelClassName(lpClassName);
 
   DWORD styleToUse = dwStyle;
+  if (isLabelClass) {
+    Wh_Log(L"CreateWindowExW label-class: style=0x%X size=%dx%d visible=%d footprintMatch=%d", dwStyle,
+           nWidth, nHeight, (dwStyle & WS_VISIBLE) != 0, RectMatchesLabelFootprint(nWidth, nHeight));
+  }
   if (g_hideDesktopSwitchLabel && isLabelClass && (dwStyle & WS_VISIBLE) &&
       RectMatchesLabelFootprint(nWidth, nHeight)) {
     styleToUse &= ~WS_VISIBLE;  // don't let it start visible; ShowWindow/SetWindowPos hooks veto it after
@@ -1235,6 +1241,7 @@ HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR l
 
   if (isLabelClass && hwnd) {
     TrackLabelWindow(hwnd);
+    Wh_Log(L"Tracking label-class window %p", hwnd);
   }
 
   return hwnd;
@@ -1243,9 +1250,13 @@ HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR l
 using ShowWindow_t = decltype(&ShowWindow);
 ShowWindow_t ShowWindow_Original;
 BOOL WINAPI ShowWindow_Hook(HWND hWnd, int nCmdShow) {
-  if (g_hideDesktopSwitchLabel && nCmdShow != SW_HIDE && IsTrackedLabelWindow(hWnd)) {
-    RECT r;
-    if (GetWindowRect(hWnd, &r) && RectMatchesLabelFootprint(r.right - r.left, r.bottom - r.top)) {
+  if (IsTrackedLabelWindow(hWnd)) {
+    RECT r = {};
+    GetWindowRect(hWnd, &r);
+    Wh_Log(L"ShowWindow tracked=%p nCmdShow=%d size=%dx%d footprintMatch=%d", hWnd, nCmdShow,
+           r.right - r.left, r.bottom - r.top, RectMatchesLabelFootprint(r.right - r.left, r.bottom - r.top));
+    if (g_hideDesktopSwitchLabel && nCmdShow != SW_HIDE &&
+        RectMatchesLabelFootprint(r.right - r.left, r.bottom - r.top)) {
       return ShowWindow_Original(hWnd, SW_HIDE);
     }
   }
@@ -1255,7 +1266,7 @@ BOOL WINAPI ShowWindow_Hook(HWND hWnd, int nCmdShow) {
 using SetWindowPos_t = decltype(&SetWindowPos);
 SetWindowPos_t SetWindowPos_Original;
 BOOL WINAPI SetWindowPos_Hook(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags) {
-  if (g_hideDesktopSwitchLabel && !(uFlags & SWP_HIDEWINDOW) && IsTrackedLabelWindow(hWnd)) {
+  if (IsTrackedLabelWindow(hWnd)) {
     int width = cx, height = cy;
     if (uFlags & SWP_NOSIZE) {
       RECT r;
@@ -1264,7 +1275,9 @@ BOOL WINAPI SetWindowPos_Hook(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int
         height = r.bottom - r.top;
       }
     }
-    if (RectMatchesLabelFootprint(width, height)) {
+    Wh_Log(L"SetWindowPos tracked=%p flags=0x%X size=%dx%d footprintMatch=%d", hWnd, uFlags, width, height,
+           RectMatchesLabelFootprint(width, height));
+    if (g_hideDesktopSwitchLabel && !(uFlags & SWP_HIDEWINDOW) && RectMatchesLabelFootprint(width, height)) {
       uFlags = (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW | SWP_NOACTIVATE;
     }
   }
