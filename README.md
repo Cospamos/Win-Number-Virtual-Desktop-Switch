@@ -66,11 +66,23 @@ feature flag - there's no regular Settings toggle for it). Live-monitoring
 window events during a switch identified it as a `XamlExplorerHostIslandWindow`
 hosted by `explorer.exe` - a class shared by several unrelated shell flyouts
 (volume, network, etc.), so this mod doesn't hide that class unconditionally.
-Instead, it only hides an instance of it that shows up in the brief moment
-right after a switch *this mod itself* triggered, which is enough to
-positively identify it without ever touching an unrelated flyout that happens
-to pop up at some other time. Toggle "Hide the 'current desktop' name overlay"
-in settings to turn this off.
+
+Two layers, in order of how much they touch:
+
+1. The windhawk.exe helper watches for that window showing up shortly after a
+   switch *this mod itself* triggered (`SetWinEventHook`) and hides it. This
+   only reacts after the window is already shown, though, so it can lose a
+   race against the overlay's own fade-in animation for a frame - a brief
+   flicker.
+2. To close that gap, the mod also injects into **explorer.exe** and hooks
+   `CreateWindowExW`/`ShowWindow`/`SetWindowPos` directly, vetoing visibility
+   for windows matching both the class name *and* the label's known size
+   footprint before they're ever painted - no flicker, but a more invasive
+   hook since it patches functions the whole shell process uses constantly.
+
+Toggle "Hide the 'current desktop' name overlay" in settings to turn both
+off if you'd rather this mod not inject into explorer.exe for this cosmetic
+feature.
 
 If you'd rather disable the underlying animation feature entirely (which this
 overlay is part of) at the OS level instead, use
