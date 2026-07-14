@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         2.1
+// @version         2.2
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -867,6 +867,21 @@ void StopDesktopSwitchLabelWatcher() {
 bool GoToDesktopNum(int desktopNum) {
   if (!InitializeVirtualDesktopAPI() || desktopNum < 1 || desktopNum > 9) return false;
 
+  if (g_hideDesktopSwitchLabel) {
+    // Arm this before EnsureDesktopCount, not just before SwitchToDesktop:
+    // creating a new desktop can itself trigger the overlay, before any
+    // actual switch happens.
+    g_desktopLabelSuppressUntilTick = GetTickCount() + 2000;
+    // The overlay window is reused across switches - if we've seen it
+    // before, hide it right now too, instead of waiting for the
+    // WinEventHook notification to arrive after Explorer shows it again.
+    if (g_knownDesktopLabelHwnd) {
+      ShowWindow(g_knownDesktopLabelHwnd, SW_HIDE);
+      SetWindowPos(g_knownDesktopLabelHwnd, nullptr, -32000, -32000, 0, 0,
+                   SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+  }
+
   if (g_autoCreateDesktop && !EnsureDesktopCount(desktopNum)) {
     Wh_Log(L"Failed to create desktop(s) up to %d", desktopNum);
   }
@@ -901,19 +916,6 @@ bool GoToDesktopNum(int desktopNum) {
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (taskbar) {
       SetForegroundWindow(taskbar);
-    }
-  }
-
-  if (g_hideDesktopSwitchLabel) {
-    g_desktopLabelSuppressUntilTick = GetTickCount() + 1500;
-    // The overlay window is reused across switches - if we've seen it
-    // before, hide it right now too, before the switch even starts, instead
-    // of waiting for the WinEventHook notification to arrive after Explorer
-    // shows it again.
-    if (g_knownDesktopLabelHwnd) {
-      ShowWindow(g_knownDesktopLabelHwnd, SW_HIDE);
-      SetWindowPos(g_knownDesktopLabelHwnd, nullptr, -32000, -32000, 0, 0,
-                   SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
     }
   }
 
