@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         2.0
+// @version         2.1
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -805,19 +805,17 @@ void ForceForegroundWindow(HWND hwnd) {
 // testing (see conversation), not via static reverse engineering.
 void SuppressDesktopLabelWindow(HWND hwnd) {
   if (!hwnd || !IsWindow(hwnd)) return;
-  // A single ShowWindow(SW_HIDE) can lose a race against the overlay's own
-  // fade-in animation re-asserting itself a frame later, so hit it repeatedly
-  // with different techniques over a short span: hide, shrink to nothing,
-  // and move off-screen, in case the actual pixels are composited by
-  // DWM/DirectComposition independently of classic Win32 visibility. Polling
-  // every ~15ms (close to one 60Hz frame) rather than 30ms catches a
-  // re-assertion sooner.
-  for (int i = 0; i < 12; ++i) {
-    ShowWindow(hwnd, SW_HIDE);
-    SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0,
-                 SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
-    Sleep(15);
-  }
+  // No blocking retry loop here on purpose: this runs on the same thread
+  // that processes hotkey messages (including the next desktop switch), so
+  // a Sleep-based retry loop stalls that thread and feels like a freeze on
+  // fast repeated switches. A single fast hide is enough in practice since
+  // the overlay's own lifecycle already generates several separate events
+  // (create/show/hide/location-change) per switch, each of which re-enters
+  // this function fresh - that gives repeated hide attempts spread over
+  // time for free, without blocking anything ourselves.
+  ShowWindow(hwnd, SW_HIDE);
+  SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0,
+               SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void CALLBACK DesktopSwitchLabelWinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,

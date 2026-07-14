@@ -83,8 +83,14 @@ also proactively re-hides that same window right before the *next* switch
 even starts - so on repeat switches there's often nothing to react to at
 all. This is reactive rather than fully preventive, so a very brief flicker
 can still be possible in rare cases, but it should be hard to notice in
-practice. Turn off "Hide the 'current desktop' name overlay" in settings to
-get Windows' default behavior back.
+practice. There's deliberately no blocking retry loop here - that was tried
+and caused noticeable stutter/freezing on fast repeated switches, since it
+blocked the same thread that processes the next switch request. A single
+fast hide attempt is enough in practice, since the overlay's own lifecycle
+already fires several separate events per switch, each giving this mod
+another shot at hiding it without blocking anything. Turn off "Hide the
+'current desktop' name overlay" in settings to get Windows' default
+behavior back.
 
 If you'd rather disable the underlying animation feature entirely (which this
 overlay is part of) at the OS level instead, use
