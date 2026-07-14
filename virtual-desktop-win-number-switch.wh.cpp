@@ -2,11 +2,10 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.9
+// @version         2.0
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
-// @include         explorer.exe
 // @compilerOptions -lole32 -loleaut32 -luuid
 // @license         MIT
 // ==/WindhawkMod==
@@ -31,8 +30,7 @@ on the taskbar) with Linux-style virtual desktop switching:
   denied and doesn't fall back to flashing a taskbar button, then takes real
   focus for the actual target window itself right after.
 - No "Desktop N" name overlay popping up on builds where that experimental
-  animation is enabled - suppressed inside explorer.exe itself before it's
-  ever painted, not reactively hidden after a flicker.
+  animation is enabled.
 
 ## How it works
 
@@ -44,16 +42,17 @@ switch/create/remove desktops and move windows between them.
 
 ## Important notes
 
-- This mod now also injects into **explorer.exe** (in addition to running its
-  own background windhawk.exe helper process) solely to hook
-  `CreateWindowExW`/`ShowWindow`/`SetWindowPos` and veto visibility for the
-  specific "Desktop N" label window (matched by class name
-  `XamlExplorerHostIslandWindow` *and* a size check, so unrelated flyouts
-  sharing that class, like volume/network, aren't touched). This is a more
-  invasive hook than the rest of the mod (it patches functions used
-  constantly by the whole shell process) - disable "Hide the 'current
-  desktop' name overlay" in settings if you'd rather this mod not inject
-  into explorer.exe at all for this cosmetic feature.
+- The "Desktop N" name overlay is a `XamlExplorerHostIslandWindow` hosted by
+  explorer.exe, and its visibility is toggled through DirectComposition/DWM
+  rather than `CreateWindowExW`/`ShowWindow`/`SetWindowPos` (confirmed by
+  injecting into explorer.exe and hooking those calls directly - they never
+  fired for it), so this mod can't veto it before it's ever painted. Instead
+  it reacts to it via `SetWinEventHook` and hides it immediately, plus
+  proactively re-hides the same window (it's reused, not recreated) right
+  before the next switch starts. This can still show a very brief flicker in
+  rare cases since it's reactive rather than fully preventive. Turn off
+  "Hide the 'current desktop' name overlay" in settings if you'd rather
+  Windows' default behavior.
 - The Virtual Desktop COM interface IDs (GUIDs) and method layout change
   between Windows builds. This mod auto-detects your build from the registry
   and picks the matching interface set. If desktop switching silently does
@@ -287,6 +286,10 @@ static bool g_hideDesktopSwitchLabel = true;
 
 static HWINEVENTHOOK g_desktopLabelHook = nullptr;
 static volatile DWORD g_desktopLabelSuppressUntilTick = 0;
+// The overlay window is reused across switches rather than recreated, so
+// once we've seen it we can suppress it proactively before the next switch
+// even starts, instead of only reacting after a fresh SHOW event.
+static HWND g_knownDesktopLabelHwnd = nullptr;
 
 #define WM_APP_SWITCH_DESKTOP (WM_APP + 1)
 #define WM_APP_MOVE_WINDOW_TO_DESKTOP (WM_APP + 2)
@@ -801,16 +804,19 @@ void ForceForegroundWindow(HWND hwnd) {
 // switch we ourselves triggered - identified live via SetWinEventHook while
 // testing (see conversation), not via static reverse engineering.
 void SuppressDesktopLabelWindow(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd)) return;
   // A single ShowWindow(SW_HIDE) can lose a race against the overlay's own
-  // fade-in animation re-asserting itself a frame later, so hit it a few
-  // times with different techniques over a short span: hide, shrink to
-  // nothing, and move off-screen, in case the actual pixels are composited
-  // by DWM/DirectComposition independently of classic Win32 visibility.
-  for (int i = 0; i < 6; ++i) {
+  // fade-in animation re-asserting itself a frame later, so hit it repeatedly
+  // with different techniques over a short span: hide, shrink to nothing,
+  // and move off-screen, in case the actual pixels are composited by
+  // DWM/DirectComposition independently of classic Win32 visibility. Polling
+  // every ~15ms (close to one 60Hz frame) rather than 30ms catches a
+  // re-assertion sooner.
+  for (int i = 0; i < 12; ++i) {
     ShowWindow(hwnd, SW_HIDE);
     SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0,
                  SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
-    Sleep(30);
+    Sleep(15);
   }
 }
 
@@ -827,13 +833,11 @@ void CALLBACK DesktopSwitchLabelWinEventProc(HWINEVENTHOOK, DWORD event, HWND hw
   bool isLabelClass = wcscmp(className, L"XamlExplorerHostIslandWindow") == 0;
 
   if (isLabelClass) {
-    Wh_Log(L"DesktopSwitchLabel event=0x%X hwnd=%p withinSuppressWindow=%d", event, hwnd,
-           withinSuppressWindow ? 1 : 0);
+    g_knownDesktopLabelHwnd = hwnd;  // remember it for next time, regardless of timing
   }
 
   if (isLabelClass && withinSuppressWindow) {
     SuppressDesktopLabelWindow(hwnd);
-    Wh_Log(L"Suppressed desktop switch label overlay");
   }
 }
 
@@ -904,8 +908,15 @@ bool GoToDesktopNum(int desktopNum) {
 
   if (g_hideDesktopSwitchLabel) {
     g_desktopLabelSuppressUntilTick = GetTickCount() + 1500;
-    Wh_Log(L"DesktopSwitchLabel suppress window armed until tick %lu (now %lu)",
-           g_desktopLabelSuppressUntilTick, GetTickCount());
+    // The overlay window is reused across switches - if we've seen it
+    // before, hide it right now too, before the switch even starts, instead
+    // of waiting for the WinEventHook notification to arrive after Explorer
+    // shows it again.
+    if (g_knownDesktopLabelHwnd) {
+      ShowWindow(g_knownDesktopLabelHwnd, SW_HIDE);
+      SetWindowPos(g_knownDesktopLabelHwnd, nullptr, -32000, -32000, 0, 0,
+                   SWP_HIDEWINDOW | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
   }
 
   bool switched = SwitchToDesktop(targetDesktop);
@@ -1173,133 +1184,6 @@ void WhTool_ModSettingsChanged() {
 }
 
 //=============================================================================
-// explorer.exe hooks: synchronously prevent the desktop-switch label overlay
-// from ever becoming visible. The windhawk.exe helper's SetWinEventHook-based
-// suppression (above) reacts to an out-of-process notification after the
-// window is already shown, which can lose a race against its own fade-in
-// animation for a frame or two. Hooking window creation/visibility calls
-// directly inside explorer.exe (where the overlay actually lives) instead
-// lets us veto it before it's ever painted - no async gap, no flicker.
-//=============================================================================
-
-static bool g_isExplorerProcess = false;
-
-// XamlExplorerHostIslandWindow is a generic class shared by several
-// unrelated shell flyouts (volume, network, etc.), so matching the class
-// name alone isn't enough - also require the window's size to roughly match
-// the small pill shape observed for the desktop-switch label (~169x71),
-// with generous tolerance, so unrelated flyouts of very different
-// dimensions are left untouched.
-bool RectMatchesLabelFootprint(int width, int height) {
-  return width >= 100 && width <= 320 && height >= 30 && height <= 160;
-}
-
-bool IsLabelClassName(LPCWSTR lpClassName) {
-  if (!lpClassName || IS_INTRESOURCE(lpClassName)) return false;
-  return wcscmp(lpClassName, L"XamlExplorerHostIslandWindow") == 0;
-}
-
-constexpr size_t kMaxTrackedLabelWindows = 8;
-static HWND g_trackedLabelWindows[kMaxTrackedLabelWindows] = {};
-
-void TrackLabelWindow(HWND hwnd) {
-  for (size_t i = 0; i < kMaxTrackedLabelWindows; ++i) {
-    if (!g_trackedLabelWindows[i] || !IsWindow(g_trackedLabelWindows[i])) {
-      g_trackedLabelWindows[i] = hwnd;
-      return;
-    }
-  }
-  g_trackedLabelWindows[0] = hwnd;  // list full of live entries; overwrite the oldest slot
-}
-
-bool IsTrackedLabelWindow(HWND hwnd) {
-  for (size_t i = 0; i < kMaxTrackedLabelWindows; ++i) {
-    if (g_trackedLabelWindows[i] == hwnd) return true;
-  }
-  return false;
-}
-
-using CreateWindowExW_t = decltype(&CreateWindowExW);
-CreateWindowExW_t CreateWindowExW_Original;
-HWND WINAPI CreateWindowExW_Hook(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName, DWORD dwStyle,
-                                  int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
-                                  HINSTANCE hInstance, LPVOID lpParam) {
-  bool isLabelClass = IsLabelClassName(lpClassName);
-
-  DWORD styleToUse = dwStyle;
-  if (isLabelClass) {
-    Wh_Log(L"CreateWindowExW label-class: style=0x%X size=%dx%d visible=%d footprintMatch=%d", dwStyle,
-           nWidth, nHeight, (dwStyle & WS_VISIBLE) != 0, RectMatchesLabelFootprint(nWidth, nHeight));
-  }
-  if (g_hideDesktopSwitchLabel && isLabelClass && (dwStyle & WS_VISIBLE) &&
-      RectMatchesLabelFootprint(nWidth, nHeight)) {
-    styleToUse &= ~WS_VISIBLE;  // don't let it start visible; ShowWindow/SetWindowPos hooks veto it after
-  }
-
-  HWND hwnd = CreateWindowExW_Original(dwExStyle, lpClassName, lpWindowName, styleToUse, X, Y, nWidth,
-                                        nHeight, hWndParent, hMenu, hInstance, lpParam);
-
-  if (isLabelClass && hwnd) {
-    TrackLabelWindow(hwnd);
-    Wh_Log(L"Tracking label-class window %p", hwnd);
-  }
-
-  return hwnd;
-}
-
-using ShowWindow_t = decltype(&ShowWindow);
-ShowWindow_t ShowWindow_Original;
-BOOL WINAPI ShowWindow_Hook(HWND hWnd, int nCmdShow) {
-  if (IsTrackedLabelWindow(hWnd)) {
-    RECT r = {};
-    GetWindowRect(hWnd, &r);
-    Wh_Log(L"ShowWindow tracked=%p nCmdShow=%d size=%dx%d footprintMatch=%d", hWnd, nCmdShow,
-           r.right - r.left, r.bottom - r.top, RectMatchesLabelFootprint(r.right - r.left, r.bottom - r.top));
-    if (g_hideDesktopSwitchLabel && nCmdShow != SW_HIDE &&
-        RectMatchesLabelFootprint(r.right - r.left, r.bottom - r.top)) {
-      return ShowWindow_Original(hWnd, SW_HIDE);
-    }
-  }
-  return ShowWindow_Original(hWnd, nCmdShow);
-}
-
-using SetWindowPos_t = decltype(&SetWindowPos);
-SetWindowPos_t SetWindowPos_Original;
-BOOL WINAPI SetWindowPos_Hook(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy, UINT uFlags) {
-  if (IsTrackedLabelWindow(hWnd)) {
-    int width = cx, height = cy;
-    if (uFlags & SWP_NOSIZE) {
-      RECT r;
-      if (GetWindowRect(hWnd, &r)) {
-        width = r.right - r.left;
-        height = r.bottom - r.top;
-      }
-    }
-    Wh_Log(L"SetWindowPos tracked=%p flags=0x%X size=%dx%d footprintMatch=%d", hWnd, uFlags, width, height,
-           RectMatchesLabelFootprint(width, height));
-    if (g_hideDesktopSwitchLabel && !(uFlags & SWP_HIDEWINDOW) && RectMatchesLabelFootprint(width, height)) {
-      uFlags = (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW | SWP_NOACTIVATE;
-    }
-  }
-  return SetWindowPos_Original(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
-}
-
-BOOL InitExplorerLabelHooks() {
-  Wh_Log(L"Installing explorer.exe hooks for desktop switch label suppression");
-
-  // Settings aren't loaded via LoadSettings() in this process (that's the
-  // windhawk.exe helper's job) - read the one flag we need directly.
-  g_hideDesktopSwitchLabel = Wh_GetIntSetting(L"HideDesktopSwitchLabel") != 0;
-
-  Wh_SetFunctionHook((void*)CreateWindowExW, (void*)CreateWindowExW_Hook,
-                     (void**)&CreateWindowExW_Original);
-  Wh_SetFunctionHook((void*)ShowWindow, (void*)ShowWindow_Hook, (void**)&ShowWindow_Original);
-  Wh_SetFunctionHook((void*)SetWindowPos, (void*)SetWindowPos_Hook, (void**)&SetWindowPos_Original);
-
-  return TRUE;
-}
-
-//=============================================================================
 // Windhawk tool mod boilerplate for mods that run in a dedicated windhawk.exe
 // process instead of injecting into other processes. Context:
 // https://github.com/ramensoftware/windhawk-mods/pull/1916
@@ -1317,14 +1201,6 @@ BOOL Wh_ModInit() {
   DWORD sessionId;
   if (ProcessIdToSessionId(GetCurrentProcessId(), &sessionId) && sessionId == 0) {
     return FALSE;
-  }
-
-  WCHAR currentModulePath[MAX_PATH] = {};
-  GetModuleFileNameW(nullptr, currentModulePath, ARRAYSIZE(currentModulePath));
-  CharLowerW(currentModulePath);
-  if (wcsstr(currentModulePath, L"\\explorer.exe")) {
-    g_isExplorerProcess = true;
-    return InitExplorerLabelHooks();
   }
 
   bool isExcluded = false;
@@ -1479,10 +1355,6 @@ void Wh_ModAfterInit() {
 }
 
 void Wh_ModSettingsChanged() {
-  if (g_isExplorerProcess) {
-    g_hideDesktopSwitchLabel = Wh_GetIntSetting(L"HideDesktopSwitchLabel") != 0;
-    return;
-  }
   if (g_isToolModProcessLauncher) {
     return;
   }
@@ -1490,12 +1362,6 @@ void Wh_ModSettingsChanged() {
 }
 
 void Wh_ModUninit() {
-  // Critical: never fall through to ExitProcess below when hosted inside
-  // explorer.exe - that would kill the shell. Windhawk removes our function
-  // hooks on unload by itself; nothing else to clean up here.
-  if (g_isExplorerProcess) {
-    return;
-  }
   if (g_isToolModProcessLauncher) {
     return;
   }

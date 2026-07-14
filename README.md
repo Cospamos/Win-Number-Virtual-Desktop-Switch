@@ -65,24 +65,26 @@ name/number when you switch (gated behind an internal, experimental Windows
 feature flag - there's no regular Settings toggle for it). Live-monitoring
 window events during a switch identified it as a `XamlExplorerHostIslandWindow`
 hosted by `explorer.exe` - a class shared by several unrelated shell flyouts
-(volume, network, etc.), so this mod doesn't hide that class unconditionally.
+(volume, network, etc.), so this mod doesn't hide that class unconditionally,
+only an instance of it tied to a switch this mod itself triggered.
 
-Two layers, in order of how much they touch:
+We also tried injecting directly into explorer.exe and hooking
+`CreateWindowExW`/`ShowWindow`/`SetWindowPos` to veto the window before it's
+ever painted (for a guaranteed zero-flicker fix). Confirmed live that none of
+those three calls ever fire for this window - its visibility is toggled
+through DirectComposition/DWM instead, which isn't something we can hook
+this way - so that approach was reverted; it added risk (patching functions
+the whole shell uses constantly) for no benefit.
 
-1. The windhawk.exe helper watches for that window showing up shortly after a
-   switch *this mod itself* triggered (`SetWinEventHook`) and hides it. This
-   only reacts after the window is already shown, though, so it can lose a
-   race against the overlay's own fade-in animation for a frame - a brief
-   flicker.
-2. To close that gap, the mod also injects into **explorer.exe** and hooks
-   `CreateWindowExW`/`ShowWindow`/`SetWindowPos` directly, vetoing visibility
-   for windows matching both the class name *and* the label's known size
-   footprint before they're ever painted - no flicker, but a more invasive
-   hook since it patches functions the whole shell process uses constantly.
-
-Toggle "Hide the 'current desktop' name overlay" in settings to turn both
-off if you'd rather this mod not inject into explorer.exe for this cosmetic
-feature.
+What the mod does instead: it watches for that window via `SetWinEventHook`
+and hides it (`ShowWindow` + moves it off-screen) the instant it sees it, and
+since the same window is reused across switches rather than recreated, it
+also proactively re-hides that same window right before the *next* switch
+even starts - so on repeat switches there's often nothing to react to at
+all. This is reactive rather than fully preventive, so a very brief flicker
+can still be possible in rare cases, but it should be hard to notice in
+practice. Turn off "Hide the 'current desktop' name overlay" in settings to
+get Windows' default behavior back.
 
 If you'd rather disable the underlying animation feature entirely (which this
 overlay is part of) at the OS level instead, use
