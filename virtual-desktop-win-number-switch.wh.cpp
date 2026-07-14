@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.6
+// @version         1.7
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -788,20 +788,38 @@ void ForceForegroundWindow(HWND hwnd) {
 // only hide instances that show up within a brief window right after a
 // switch we ourselves triggered - identified live via SetWinEventHook while
 // testing (see conversation), not via static reverse engineering.
+void SuppressDesktopLabelWindow(HWND hwnd) {
+  // A single ShowWindow(SW_HIDE) can lose a race against the overlay's own
+  // fade-in animation re-asserting itself a frame later, so hit it a few
+  // times with different techniques over a short span.
+  for (int i = 0; i < 6; ++i) {
+    ShowWindow(hwnd, SW_HIDE);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    Sleep(30);
+  }
+}
+
 void CALLBACK DesktopSwitchLabelWinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
                                               LONG idChild, DWORD, DWORD) {
-  if (event != EVENT_OBJECT_SHOW || idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) {
+  if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) {
     return;
   }
-  if ((LONG)(GetTickCount() - g_desktopLabelSuppressUntilTick) > 0) {
-    return;  // outside the window right after our own switch - leave it alone
-  }
+
+  bool withinSuppressWindow = (LONG)(GetTickCount() - g_desktopLabelSuppressUntilTick) <= 0;
 
   WCHAR className[64] = {};
   GetClassNameW(hwnd, className, ARRAYSIZE(className));
-  if (wcscmp(className, L"XamlExplorerHostIslandWindow") == 0) {
-    ShowWindow(hwnd, SW_HIDE);
-    Wh_Log(L"Hid desktop switch label overlay");
+  bool isLabelClass = wcscmp(className, L"XamlExplorerHostIslandWindow") == 0;
+
+  if (isLabelClass) {
+    Wh_Log(L"DesktopSwitchLabel event=0x%X hwnd=%p withinSuppressWindow=%d", event, hwnd,
+           withinSuppressWindow ? 1 : 0);
+  }
+
+  if (isLabelClass && withinSuppressWindow) {
+    SuppressDesktopLabelWindow(hwnd);
+    Wh_Log(L"Suppressed desktop switch label overlay");
   }
 }
 
@@ -811,7 +829,11 @@ void StartDesktopSwitchLabelWatcher() {
   if (taskbar) {
     GetWindowThreadProcessId(taskbar, &explorerPid);
   }
-  g_desktopLabelHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr,
+  // Cover the whole object-visibility/lifecycle range (create, destroy, show,
+  // hide, reorder, focus, selection*, state change, location change) since
+  // the overlay's animation may re-assert visibility/position after the
+  // initial show, not just fire a single EVENT_OBJECT_SHOW.
+  g_desktopLabelHook = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
                                        DesktopSwitchLabelWinEventProc, explorerPid, 0,
                                        WINEVENT_OUTOFCONTEXT);
   if (!g_desktopLabelHook) {
@@ -868,6 +890,8 @@ bool GoToDesktopNum(int desktopNum) {
 
   if (g_hideDesktopSwitchLabel) {
     g_desktopLabelSuppressUntilTick = GetTickCount() + 1500;
+    Wh_Log(L"DesktopSwitchLabel suppress window armed until tick %lu (now %lu)",
+           g_desktopLabelSuppressUntilTick, GetTickCount());
   }
 
   bool switched = SwitchToDesktop(targetDesktop);
