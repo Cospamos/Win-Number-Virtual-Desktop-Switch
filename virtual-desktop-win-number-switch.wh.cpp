@@ -2,7 +2,7 @@
 // @id              virtual-desktop-win-number-switch
 // @name            Win+Number Virtual Desktop Switch
 // @description     Remaps Win+1..9 from "activate Nth taskbar app" to Linux-style virtual desktop switching, with auto-create/auto-remove of desktops
-// @version         1.5
+// @version         1.6
 // @author          Cospamos
 // @github          https://github.com/Cospamos/Win-Number-Virtual-Desktop-Switch
 // @include         windhawk.exe
@@ -29,6 +29,8 @@ on the taskbar) with Linux-style virtual desktop switching:
   focus to Explorer's own taskbar window so its internal focus-restore isn't
   denied and doesn't fall back to flashing a taskbar button, then takes real
   focus for the actual target window itself right after.
+- No "Desktop N" name overlay popping up on builds where that experimental
+  animation is enabled.
 
 ## How it works
 
@@ -112,6 +114,17 @@ switch/create/remove desktops and move windows between them.
     forces focus onto the last active window on the desktop you switch to,
     which prevents that flash. Turn off to get Windows' default (flashing)
     behavior back.
+
+- HideDesktopSwitchLabel: true
+  $name: Hide the "current desktop" name overlay
+  $description: >-
+    On newer Windows 11 builds with the experimental desktop-switch
+    animation feature enabled, a small "Desktop N" label pops up near the
+    bottom of the screen every time you switch. When enabled, this mod
+    hides that specific overlay right after a switch it triggered (it does
+    not touch unrelated popups like volume/network flyouts, which share the
+    same underlying window class but only get hidden if they happen to show
+    up in the brief moment right after our own switch).
 
 - RequestElevatedHelper: false
   $name: Request admin rights for the background helper
@@ -258,6 +271,10 @@ static bool g_enableMoveWindowSwitch = true;
 static bool g_autoCreateDesktop = true;
 static bool g_autoRemoveEmptyDesktop = true;
 static bool g_fixTaskbarFlash = true;
+static bool g_hideDesktopSwitchLabel = true;
+
+static HWINEVENTHOOK g_desktopLabelHook = nullptr;
+static volatile DWORD g_desktopLabelSuppressUntilTick = 0;
 
 #define WM_APP_SWITCH_DESKTOP (WM_APP + 1)
 #define WM_APP_MOVE_WINDOW_TO_DESKTOP (WM_APP + 2)
@@ -350,6 +367,7 @@ void LoadSettings() {
   g_autoCreateDesktop = Wh_GetIntSetting(L"AutoCreateDesktop") != 0;
   g_autoRemoveEmptyDesktop = Wh_GetIntSetting(L"AutoRemoveEmptyDesktop") != 0;
   g_fixTaskbarFlash = Wh_GetIntSetting(L"FixTaskbarFlash") != 0;
+  g_hideDesktopSwitchLabel = Wh_GetIntSetting(L"HideDesktopSwitchLabel") != 0;
 }
 
 //=============================================================================
@@ -763,6 +781,51 @@ void ForceForegroundWindow(HWND hwnd) {
   }
 }
 
+// The "Desktop N" name overlay (on Windows 11 builds with the experimental
+// desktop-switch animation enabled) is a XamlExplorerHostIslandWindow hosted
+// by explorer.exe. That window class is shared by several unrelated shell
+// flyouts (volume, network, etc.), so instead of hiding it unconditionally,
+// only hide instances that show up within a brief window right after a
+// switch we ourselves triggered - identified live via SetWinEventHook while
+// testing (see conversation), not via static reverse engineering.
+void CALLBACK DesktopSwitchLabelWinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
+                                              LONG idChild, DWORD, DWORD) {
+  if (event != EVENT_OBJECT_SHOW || idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) {
+    return;
+  }
+  if ((LONG)(GetTickCount() - g_desktopLabelSuppressUntilTick) > 0) {
+    return;  // outside the window right after our own switch - leave it alone
+  }
+
+  WCHAR className[64] = {};
+  GetClassNameW(hwnd, className, ARRAYSIZE(className));
+  if (wcscmp(className, L"XamlExplorerHostIslandWindow") == 0) {
+    ShowWindow(hwnd, SW_HIDE);
+    Wh_Log(L"Hid desktop switch label overlay");
+  }
+}
+
+void StartDesktopSwitchLabelWatcher() {
+  HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+  DWORD explorerPid = 0;
+  if (taskbar) {
+    GetWindowThreadProcessId(taskbar, &explorerPid);
+  }
+  g_desktopLabelHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr,
+                                       DesktopSwitchLabelWinEventProc, explorerPid, 0,
+                                       WINEVENT_OUTOFCONTEXT);
+  if (!g_desktopLabelHook) {
+    Wh_Log(L"Failed to install desktop switch label watcher");
+  }
+}
+
+void StopDesktopSwitchLabelWatcher() {
+  if (g_desktopLabelHook) {
+    UnhookWinEvent(g_desktopLabelHook);
+    g_desktopLabelHook = nullptr;
+  }
+}
+
 bool GoToDesktopNum(int desktopNum) {
   if (!InitializeVirtualDesktopAPI() || desktopNum < 1 || desktopNum > 9) return false;
 
@@ -801,6 +864,10 @@ bool GoToDesktopNum(int desktopNum) {
     if (taskbar) {
       SetForegroundWindow(taskbar);
     }
+  }
+
+  if (g_hideDesktopSwitchLabel) {
+    g_desktopLabelSuppressUntilTick = GetTickCount() + 1500;
   }
 
   bool switched = SwitchToDesktop(targetDesktop);
@@ -950,6 +1017,8 @@ DWORD WINAPI HotkeyThreadProc(LPVOID) {
     Wh_Log(L"Failed to install keyboard hook: %lu", GetLastError());
   }
 
+  StartDesktopSwitchLabelWatcher();
+
   while (!g_stopHotkeyThread) {
     DWORD waitResult = MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
 
@@ -982,6 +1051,7 @@ cleanup:
     UnhookWindowsHookEx(g_keyboardHook);
     g_keyboardHook = nullptr;
   }
+  StopDesktopSwitchLabelWatcher();
 
   CleanupVirtualDesktopAPI();
   CoUninitialize();

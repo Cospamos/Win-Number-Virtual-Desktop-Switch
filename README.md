@@ -14,6 +14,8 @@ Linux-style virtual desktop switching:
   automatically**.
 - No taskbar flash asking you to switch back after switching desktops (see
   below).
+- No "Desktop N" name overlay popping up on builds where that experimental
+  animation is enabled (see below).
 
 ## Installation
 
@@ -40,6 +42,7 @@ and friends) to switch, create, and remove desktops.
 | Auto-create missing desktops | on | Create desktop N (and any before it) if it doesn't exist yet. |
 | Auto-remove empty desktops | on | Remove a desktop you just left if it has no windows on it. |
 | Prevent taskbar flash after switching desktops | on | See below. |
+| Hide the "current desktop" name overlay | on | See below. |
 | Request admin rights for the background helper | **off** | See below. |
 
 ## Taskbar flash after switching desktops
@@ -55,23 +58,30 @@ retried `FLASHW_STOP` calls as a safety net for anything Explorer schedules
 slightly late). Turn off "Prevent taskbar flash after switching desktops" in
 settings to get Windows' default (flashing) behavior back.
 
-## Hiding the "current desktop" name indicator
+## Hiding the "current desktop" name overlay
 
 Recent Windows 11 builds can show a small on-screen label with the desktop's
-name/number when you switch. That's a native shell overlay gated behind an
-internal Windows feature flag (not a regular Settings toggle), so this mod
-doesn't touch it - it's not something a Windhawk mod draws or controls.
+name/number when you switch (gated behind an internal, experimental Windows
+feature flag - there's no regular Settings toggle for it). Live-monitoring
+window events during a switch identified it as a `XamlExplorerHostIslandWindow`
+hosted by `explorer.exe` - a class shared by several unrelated shell flyouts
+(volume, network, etc.), so this mod doesn't hide that class unconditionally.
+Instead, it only hides an instance of it that shows up in the brief moment
+right after a switch *this mod itself* triggered, which is enough to
+positively identify it without ever touching an unrelated flyout that happens
+to pop up at some other time. Toggle "Hide the 'current desktop' name overlay"
+in settings to turn this off.
 
-If you enabled it yourself (or it got turned on for you) and want it gone,
-use [ViVeTool](https://github.com/thebookisclosed/ViVe) as Administrator:
+If you'd rather disable the underlying animation feature entirely (which this
+overlay is part of) at the OS level instead, use
+[ViVeTool](https://github.com/thebookisclosed/ViVe) as Administrator:
 
 ```
 vivetool /disable /id:42354458,34508225,40459297
 ```
 
 then restart. Note these feature IDs are shared with some Cloud PC/Windows
-365 switching functionality, so treat this as an experimental tweak rather
-than a dedicated "hide the label" switch.
+365 switching functionality, so treat this as an experimental tweak.
 
 ## A note on admin rights (UIPI)
 
